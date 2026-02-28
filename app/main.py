@@ -26,7 +26,12 @@ for directory in (DATA_DIR, STORAGE_DIR, TMP_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 
-DATE_PATTERN = re.compile(r"(20\d{2})[-年/.]?(\d{1,2})[-月/.]?(\d{1,2})")
+DATE_PATTERN = re.compile(r"(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})")
+TAG_DATE_PATTERNS = (
+    re.compile(r"<IssueTime>(.*?)</IssueTime>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<StartDatesOfPassage>(.*?)</StartDatesOfPassage>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<EndDatesOfPassage>(.*?)</EndDatesOfPassage>", re.IGNORECASE | re.DOTALL),
+)
 AMOUNT_PATTERNS = (
     re.compile(r"<TotalTax-includedAmount>([0-9]+(?:\.[0-9]+)?)</TotalTax-includedAmount>"),
     re.compile(r"<TotaltaxIncludedAmount>([0-9]+(?:\.[0-9]+)?)</TotaltaxIncludedAmount>"),
@@ -56,14 +61,49 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 
 def parse_date_from_text(text: str) -> date | None:
-    match = DATE_PATTERN.search(text)
-    if not match:
+    def build_date(year: int, month: int, day: int) -> date | None:
+        current_year = datetime.now().year
+        if year < 2018 or year > current_year + 1:
+            return None
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+    def parse_one(value: str) -> date | None:
+        value = value.strip()
+
+        sep_match = DATE_PATTERN.search(value)
+        if sep_match:
+            return build_date(int(sep_match.group(1)), int(sep_match.group(2)), int(sep_match.group(3)))
+
+        compact_match = re.search(r"(20\d{2})(\d{2})(\d{2})", value)
+        if compact_match:
+            return build_date(int(compact_match.group(1)), int(compact_match.group(2)), int(compact_match.group(3)))
+
         return None
-    year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    try:
-        return date(year, month, day)
-    except ValueError:
+
+    candidates: list[date] = []
+
+    for pattern in TAG_DATE_PATTERNS:
+        for matched in pattern.findall(text):
+            parsed = parse_one(matched)
+            if parsed:
+                candidates.append(parsed)
+
+    if candidates:
+        return Counter(candidates).most_common(1)[0][0]
+
+    fallback_candidates: list[date] = []
+    for match in DATE_PATTERN.finditer(text):
+        parsed = build_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        if parsed:
+            fallback_candidates.append(parsed)
+
+    if not fallback_candidates:
         return None
+
+    return Counter(fallback_candidates).most_common(1)[0][0]
 
 
 def parse_amount_from_xml(text: str) -> float:
