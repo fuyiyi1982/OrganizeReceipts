@@ -458,6 +458,15 @@ def get_user_by_id(user_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_user_by_username(username: str) -> dict | None:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, username, is_admin, created_at FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_current_user(request: Request) -> dict | None:
     user_id = request.session.get("user_id")
     if not user_id:
@@ -621,6 +630,151 @@ def admin_invites(request: Request, message: str | None = None) -> HTMLResponse:
         "admin_invites.html",
         {"invites": [dict(r) for r in rows], "message": message},
     )
+
+
+@app.get("/admin/users", response_class=HTMLResponse)
+def admin_users(request: Request, message: str | None = None) -> HTMLResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.get("is_admin"):
+        return RedirectResponse(url=f"/?message={quote('仅管理员可访问')}", status_code=303)
+
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, username, is_admin, created_at FROM users ORDER BY id ASC"
+        ).fetchall()
+
+    return render_page(
+        request,
+        "admin_users.html",
+        {"users": [dict(r) for r in rows], "message": message},
+    )
+
+
+@app.post("/admin/users/{target_user_id}/reset-password")
+def admin_reset_password(
+    target_user_id: int,
+    request: Request,
+    new_password: str = Form(...),
+) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.get("is_admin"):
+        return RedirectResponse(url=f"/?message={quote('仅管理员可操作')}", status_code=303)
+
+    if len(new_password) < 6:
+        return RedirectResponse(
+            url=f"/admin/users?message={quote('新密码至少6位')}",
+            status_code=303,
+        )
+
+    with db_conn() as conn:
+        target = conn.execute(
+            "SELECT id, username FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        if not target:
+            return RedirectResponse(
+                url=f"/admin/users?message={quote('目标用户不存在')}",
+                status_code=303,
+            )
+
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(new_password), target_user_id),
+        )
+        conn.commit()
+
+    msg = f"已重置用户 {target['username']} 的密码"
+    return RedirectResponse(url=f"/admin/users?message={quote(msg)}", status_code=303)
+
+
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, message: str | None = None) -> HTMLResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    return render_page(
+        request,
+        "profile.html",
+        {"message": message},
+    )
+
+
+@app.post("/profile/update")
+def profile_update(request: Request, username: str = Form(...)) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    new_username = username.strip()
+    if len(new_username) < 3:
+        return RedirectResponse(
+            url=f"/profile?message={quote('用户名至少3个字符')}",
+            status_code=303,
+        )
+
+    existed = get_user_by_username(new_username)
+    if existed and int(existed["id"]) != int(user["id"]):
+        return RedirectResponse(
+            url=f"/profile?message={quote('用户名已存在')}",
+            status_code=303,
+        )
+
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE users SET username = ? WHERE id = ?",
+            (new_username, int(user["id"])),
+        )
+        conn.commit()
+
+    msg = "用户信息已更新"
+    return RedirectResponse(url=f"/profile?message={quote(msg)}", status_code=303)
+
+
+@app.post("/profile/password")
+def profile_change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if len(new_password) < 6:
+        return RedirectResponse(
+            url=f"/profile?message={quote('新密码至少6位')}",
+            status_code=303,
+        )
+    if new_password != confirm_password:
+        return RedirectResponse(
+            url=f"/profile?message={quote('两次输入的新密码不一致')}",
+            status_code=303,
+        )
+
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?",
+            (int(user["id"]),),
+        ).fetchone()
+        if not row or not verify_password(current_password, row["password_hash"]):
+            return RedirectResponse(
+                url=f"/profile?message={quote('当前密码不正确')}",
+                status_code=303,
+            )
+
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(new_password), int(user["id"])),
+        )
+        conn.commit()
+
+    return RedirectResponse(url=f"/profile?message={quote('密码已修改')}", status_code=303)
 
 
 @app.post("/admin/invites/create")
