@@ -54,6 +54,18 @@ button:hover {
   background: #173a5b;
 }
 
+button.danger {
+  background: #b42318;
+}
+
+button.danger:hover {
+  background: #8e1a13;
+}
+
+.inline-form {
+  display: inline;
+}
+
 .hint {
   margin-top: 8px;
   color: #4b5563;

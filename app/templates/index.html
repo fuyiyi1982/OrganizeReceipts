@@ -23,6 +23,7 @@
           <th>行程段数</th>
           <th>合计金额(元)</th>
           <th>操作</th>
+          <th>数据维护</th>
         </tr>
       </thead>
       <tbody>
@@ -36,12 +37,59 @@
             <span> | </span>
             <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">按日下载ZIP</a>
           </td>
+          <td>
+            <form action="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}/clear" method="post" onsubmit="return confirm('确定清空该日期下全部行程数据吗？');">
+              <button type="submit" class="danger">清空当天数据</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
   {% else %}
     <p>暂无数据，请先上传压缩包。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>上传文件管理</h2>
+  {% if uploads %}
+    <table>
+      <thead>
+        <tr>
+          <th>上传时间</th>
+          <th>原文件名</th>
+          <th>状态</th>
+          <th>新增行程</th>
+          <th>SHA256(前12位)</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for u in uploads %}
+        <tr>
+          <td>{{ u.uploaded_at }}</td>
+          <td>{{ u.original_name }}</td>
+          <td>{{ u.status }}</td>
+          <td>{{ u.trip_count or 0 }}</td>
+          <td>{{ (u.sha256 or '')[:12] }}</td>
+          <td>
+            {% if u.status != 'deleted' and u.file_exists %}
+              <a href="/uploads/{{ u.id }}/download">下载源文件</a>
+              <span> | </span>
+              <form action="/uploads/{{ u.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('确定删除这个上传源文件吗？');">
+                <button type="submit" class="danger">删除</button>
+              </form>
+            {% else %}
+              <span>-</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>暂无上传记录。</p>
   {% endif %}
 </section>
 {% endblock %}

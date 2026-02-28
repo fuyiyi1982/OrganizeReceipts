@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
 import re
 import shutil
+import uuid
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
@@ -21,8 +24,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 STORAGE_DIR = DATA_DIR / "storage"
 TMP_DIR = DATA_DIR / "tmp"
+UPLOADS_DIR = DATA_DIR / "uploads"
+UPLOAD_RECORDS_FILE = DATA_DIR / "upload_records.json"
 
-for directory in (DATA_DIR, STORAGE_DIR, TMP_DIR):
+for directory in (DATA_DIR, STORAGE_DIR, TMP_DIR, UPLOADS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -112,6 +117,40 @@ def parse_amount_from_xml(text: str) -> float:
         if match:
             return float(match.group(1))
     return 0.0
+
+
+def load_upload_records() -> list[dict]:
+    if not UPLOAD_RECORDS_FILE.exists():
+        return []
+    try:
+        return json.loads(UPLOAD_RECORDS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_upload_records(records: list[dict]) -> None:
+    UPLOAD_RECORDS_FILE.write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def list_uploads() -> list[dict]:
+    records = load_upload_records()
+    sorted_records = sorted(records, key=lambda r: r.get("uploaded_at", ""), reverse=True)
+    for rec in sorted_records:
+        stored_name = rec.get("stored_name", "")
+        file_path = UPLOADS_DIR / stored_name if stored_name else None
+        rec["file_exists"] = bool(file_path and file_path.exists())
+    return sorted_records
 
 
 def extract_zip(zip_path: Path, destination: Path) -> None:
@@ -324,6 +363,14 @@ def within_storage(path: Path) -> bool:
         return False
 
 
+def within_uploads(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(UPLOADS_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, message: str | None = None) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -331,6 +378,7 @@ def index(request: Request, message: str | None = None) -> HTMLResponse:
         {
             "request": request,
             "days": list_days(),
+            "uploads": list_uploads(),
             "message": message,
         },
     )
@@ -339,13 +387,21 @@ def index(request: Request, message: str | None = None) -> HTMLResponse:
 @app.post("/upload")
 async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
     if not files:
-        return RedirectResponse(url="/?message=未选择文件", status_code=303)
+        return RedirectResponse(url=f"/?message={quote('未选择文件')}", status_code=303)
 
     workspace = TMP_DIR / f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     workspace.mkdir(parents=True, exist_ok=True)
 
+    upload_records = load_upload_records()
+    active_hashes = {
+        r.get("sha256")
+        for r in upload_records
+        if r.get("sha256") and r.get("status") != "deleted"
+    }
+
     processed_count = 0
     trip_count = 0
+    duplicate_count = 0
 
     try:
         for upload_file in files:
@@ -354,18 +410,59 @@ async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
             if not upload_file.filename.lower().endswith(".zip"):
                 continue
 
-            target = workspace / Path(upload_file.filename).name
+            upload_id = uuid.uuid4().hex
+            safe_name = Path(upload_file.filename).name
+            stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{upload_id}_{safe_name}"
+            target = UPLOADS_DIR / stored_name
             with target.open("wb") as f:
                 shutil.copyfileobj(upload_file.file, f)
+
+            file_hash = sha256_of_file(target)
+            file_size = target.stat().st_size
+
+            if file_hash in active_hashes:
+                duplicate_count += 1
+                target.unlink(missing_ok=True)
+                upload_records.append(
+                    {
+                        "id": upload_id,
+                        "original_name": safe_name,
+                        "stored_name": "",
+                        "sha256": file_hash,
+                        "size": file_size,
+                        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "duplicate",
+                        "trip_count": 0,
+                        "message": "重复上传，已跳过处理",
+                    }
+                )
+                continue
 
             records = process_uploaded_zip(target, workspace)
             processed_count += 1
             trip_count += len(records)
+            active_hashes.add(file_hash)
+
+            upload_records.append(
+                {
+                    "id": upload_id,
+                    "original_name": safe_name,
+                    "stored_name": stored_name,
+                    "sha256": file_hash,
+                    "size": file_size,
+                    "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+                    "status": "processed",
+                    "trip_count": len(records),
+                    "message": "处理成功",
+                }
+            )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
-    msg = f"上传完成：处理压缩包 {processed_count} 个，新增行程 {trip_count} 段"
-    return RedirectResponse(url=f"/?message={msg}", status_code=303)
+    save_upload_records(upload_records)
+
+    msg = f"上传完成：处理压缩包 {processed_count} 个，新增行程 {trip_count} 段，重复跳过 {duplicate_count} 个"
+    return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)
 
 
 @app.get("/day/{year}/{month}/{day}", response_class=HTMLResponse)
@@ -405,6 +502,17 @@ def view_day(year: int, month: int, day: int, request: Request) -> HTMLResponse:
     )
 
 
+@app.post("/day/{year}/{month}/{day}/clear")
+def clear_day(year: int, month: int, day: int) -> RedirectResponse:
+    day_dir = STORAGE_DIR / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
+    if day_dir.exists() and day_dir.is_dir():
+        shutil.rmtree(day_dir, ignore_errors=True)
+        msg = f"已清空 {year:04d}-{month:02d}-{day:02d} 的数据"
+    else:
+        msg = f"{year:04d}-{month:02d}-{day:02d} 不存在"
+    return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)
+
+
 @app.get("/download/day/{year}/{month}/{day}")
 def download_day(year: int, month: int, day: int) -> StreamingResponse:
     day_dir = get_day_dir(year, month, day)
@@ -427,3 +535,55 @@ def download_file(year: int, month: int, day: int, trip: str, filename: str) -> 
     if not file_path.exists() or not file_path.is_file() or not within_storage(file_path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path=file_path)
+
+
+@app.get("/uploads/{upload_id}/download")
+def download_upload(upload_id: str) -> FileResponse:
+    records = load_upload_records()
+    record = next((r for r in records if r.get("id") == upload_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="上传记录不存在")
+
+    stored_name = record.get("stored_name", "")
+    if not stored_name:
+        raise HTTPException(status_code=404, detail="该记录没有可下载源文件")
+
+    file_path = UPLOADS_DIR / stored_name
+    if not file_path.exists() or not file_path.is_file() or not within_uploads(file_path):
+        raise HTTPException(status_code=404, detail="源文件不存在")
+
+    filename = record.get("original_name") or file_path.name
+    return FileResponse(path=file_path, filename=filename)
+
+
+@app.post("/uploads/{upload_id}/delete")
+def delete_upload(upload_id: str) -> RedirectResponse:
+    records = load_upload_records()
+    changed = False
+    deleted_name = ""
+
+    for record in records:
+        if record.get("id") != upload_id:
+            continue
+        if record.get("status") == "deleted":
+            break
+
+        stored_name = record.get("stored_name", "")
+        if stored_name:
+            file_path = UPLOADS_DIR / stored_name
+            if file_path.exists() and file_path.is_file() and within_uploads(file_path):
+                file_path.unlink(missing_ok=True)
+            deleted_name = record.get("original_name", stored_name)
+
+        record["status"] = "deleted"
+        record["deleted_at"] = datetime.now().isoformat(timespec="seconds")
+        changed = True
+        break
+
+    if changed:
+        save_upload_records(records)
+        msg = f"已删除上传文件：{deleted_name or upload_id}"
+    else:
+        msg = "未找到可删除的上传记录"
+
+    return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)

@@ -8,6 +8,9 @@
     <span> | </span>
     <a href="/download/day/{{ year }}/{{ month }}/{{ day }}">下载当日ZIP</a>
   </p>
+  <form action="/day/{{ year }}/{{ month }}/{{ day }}/clear" method="post" onsubmit="return confirm('确定清空该日期下全部行程数据吗？');">
+    <button type="submit" class="danger">清空当天数据</button>
+  </form>
 </section>
 
 {% for trip in trips %}
