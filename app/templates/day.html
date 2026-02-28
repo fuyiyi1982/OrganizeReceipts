@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card">
+  <h2>日期：{{ "%04d-%02d-%02d"|format(year, month, day) }}</h2>
+  <p>
+    <a href="/">返回首页</a>
+    <span> | </span>
+    <a href="/download/day/{{ year }}/{{ month }}/{{ day }}">下载当日ZIP</a>
+  </p>
+</section>
+
+{% for trip in trips %}
+<section class="card">
+  <h3>{{ trip.name }}</h3>
+  <p>
+    金额：{{ "%.2f"|format(trip.metadata.get('total_amount', 0)) }} 元，
+    发票：{{ trip.metadata.get('invoice_count', 0) }} 张
+  </p>
+
+  {% if trip.itinerary %}
+    <p>
+      行程单：
+      <a href="/file/{{ year }}/{{ month }}/{{ day }}/{{ trip.name }}/itinerary.pdf">itinerary.pdf</a>
+    </p>
+  {% else %}
+    <p>行程单：无</p>
+  {% endif %}
+
+  <p>发票：</p>
+  <ul>
+    {% for invoice in trip.invoices %}
+      <li>
+        <a href="/file/{{ year }}/{{ month }}/{{ day }}/{{ trip.name }}/{{ invoice.name }}">{{ invoice.name }}</a>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+
+{% if not trips %}
+<section class="card"><p>该日期暂无行程数据。</p></section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card">
+  <h2>上传压缩包</h2>
+  <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form">
+    <input type="file" name="files" accept=".zip" multiple required />
+    <button type="submit">开始整理</button>
+  </form>
+  <p class="hint">支持一次上传多个 ZIP 文件（例如当月导出的多个分卷压缩包）。</p>
+  {% if message %}
+    <p class="message">{{ message }}</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>已整理日期</h2>
+  {% if days %}
+    <table>
+      <thead>
+        <tr>
+          <th>日期</th>
+          <th>行程段数</th>
+          <th>合计金额(元)</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for d in days %}
+        <tr>
+          <td>{{ "%04d-%02d-%02d"|format(d.year, d.month, d.day) }}</td>
+          <td>{{ d.trip_count }}</td>
+          <td>{{ "%.2f"|format(d.total_amount) }}</td>
+          <td>
+            <a href="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">查看</a>
+            <span> | </span>
+            <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">按日下载ZIP</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>暂无数据，请先上传压缩包。</p>
+  {% endif %}
+</section>
+{% endblock %}

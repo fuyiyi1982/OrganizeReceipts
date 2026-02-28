@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  toll-organizer:
+    build: .
+    container_name: toll-organizer
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
