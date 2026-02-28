@@ -44,7 +44,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 1. 克隆项目
 
 ```bash
-git clone <your-repo-url> toll-organizer-web
+git clone https://github.com/fuyiyi1982/OrganizeReceipts.git toll-organizer-web
 cd toll-organizer-web
 ```
 
@@ -59,9 +59,42 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-3. 可选：使用 Nginx 反向代理到 8000 端口。
+3. 配置 systemd（推荐）
+
+创建服务文件：
+
+```bash
+sudo tee /etc/systemd/system/toll-organizer.service > /dev/null <<'EOF'
+[Unit]
+Description=Toll Organizer Web
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/toll-organizer-web
+Environment="PATH=/home/ubuntu/toll-organizer-web/.venv/bin"
+ExecStart=/home/ubuntu/toll-organizer-web/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+启动并设置开机自启：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable toll-organizer
+sudo systemctl start toll-organizer
+sudo systemctl status toll-organizer
+```
+
+4. 可选：使用 Nginx 反向代理到 8000 端口。
 
 ## Docker 部署
+
+先安装 Docker 与 Docker Compose Plugin，然后执行：
 
 ```bash
 docker compose up -d --build
