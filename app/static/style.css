@@ -26,6 +26,20 @@ body {
   opacity: 0.95;
 }
 
+.top-nav {
+  margin-top: 10px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.top-nav a,
+.top-nav span {
+  color: #fff;
+  opacity: 0.95;
+}
+
 .card {
   background: #fff;
   border-radius: 10px;
@@ -64,6 +78,31 @@ button.danger:hover {
 
 .inline-form {
   display: inline;
+}
+
+.auth-card {
+  max-width: 460px;
+}
+
+.auth-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.batch-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 
 .hint {

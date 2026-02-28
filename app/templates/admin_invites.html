@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card">
+  <h2>邀请码管理（管理员）</h2>
+  <form action="/admin/invites/create" method="post" class="upload-form">
+    <label>生成数量：</label>
+    <input type="number" name="count" min="1" max="100" value="10" />
+    <button type="submit">生成邀请码</button>
+  </form>
+  {% if message %}
+    <p class="message">{{ message }}</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>邀请码列表</h2>
+  {% if invites %}
+    <table>
+      <thead>
+        <tr>
+          <th>邀请码</th>
+          <th>创建时间</th>
+          <th>使用人</th>
+          <th>使用时间</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for i in invites %}
+        <tr>
+          <td>{{ i.code }}</td>
+          <td>{{ i.created_at }}</td>
+          <td>{{ i.used_by_name or '-' }}</td>
+          <td>{{ i.used_at or '-' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>暂无邀请码。</p>
+  {% endif %}
+</section>
+{% endblock %}

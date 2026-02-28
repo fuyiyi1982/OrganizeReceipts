@@ -8,9 +8,13 @@
 - 自动识别行程段目录（`apply.zip + detail.zip`）
 - 从 `apply.zip` 内提取全部发票 PDF 与 XML
 - 从 `detail.zip` 提取 `trans.pdf` 作为行程单
-- 自动按 `storage/YYYY/MM/DD/trip_xxx` 存储
+- 自动按 `storage/user_xx/YYYY/MM/DD/trip_xxx` 存储（用户隔离）
 - Web 页面展示每日段次、金额、文件列表
 - 提供“按日打包 ZIP”下载接口
+- 上传记录管理（下载源文件、删除源文件）
+- 重复上传检测（按 SHA256 去重）
+- 批量清空勾选日期数据
+- 用户注册（需邀请码）与管理员后台邀请码管理
 
 ## 目录结构
 
@@ -112,9 +116,18 @@ docker compose up -d --build
   - `TotalTax-includedAmount`
   - 兼容 `TotaltaxIncludedAmount`
 
+## 账号与权限
+
+- 默认管理员账号：
+  - 用户名：`admin`
+  - 密码：`fyy525200`
+- 普通用户注册必须输入邀请码
+- 邀请码由管理员在后台页面生成：`/admin/invites`
+
 ## 典型使用流程
 
 1. 打开首页上传多个当月 ZIP 文件
 2. 系统自动完成分类
 3. 在“已整理日期”列表里查看某天明细
 4. 点击“按日下载ZIP”获取报销打包文件
+5. 如需删除数据，可在首页勾选多个日期后批量清空

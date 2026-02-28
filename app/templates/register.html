@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card auth-card">
+  <h2>注册</h2>
+  <form action="/register" method="post" class="auth-form">
+    <label>用户名</label>
+    <input type="text" name="username" required minlength="3" />
+    <label>密码</label>
+    <input type="password" name="password" required minlength="6" />
+    <label>邀请码</label>
+    <input type="text" name="invite_code" required />
+    <button type="submit">注册</button>
+  </form>
+  {% if message %}
+    <p class="message">{{ message }}</p>
+  {% endif %}
+  <p class="hint">已有账号？<a href="/login">去登录</a></p>
+</section>
+{% endblock %}

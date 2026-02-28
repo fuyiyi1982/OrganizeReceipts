@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
-import hashlib
+import os
 import re
+import secrets
 import shutil
+import sqlite3
 import uuid
 import zipfile
 from collections import Counter
@@ -14,10 +17,11 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,7 +29,7 @@ DATA_DIR = BASE_DIR / "data"
 STORAGE_DIR = DATA_DIR / "storage"
 TMP_DIR = DATA_DIR / "tmp"
 UPLOADS_DIR = DATA_DIR / "uploads"
-UPLOAD_RECORDS_FILE = DATA_DIR / "upload_records.json"
+DB_PATH = DATA_DIR / "app.db"
 
 for directory in (DATA_DIR, STORAGE_DIR, TMP_DIR, UPLOADS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -61,8 +65,102 @@ class TripRecord:
 
 
 app = FastAPI(title="Toll Invoice Organizer")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "replace-this-in-production"),
+    max_age=60 * 60 * 24 * 7,
+)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app" / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    with db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                created_by INTEGER NOT NULL,
+                used_by INTEGER,
+                created_at TEXT NOT NULL,
+                used_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upload_records (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                original_name TEXT NOT NULL,
+                stored_name TEXT,
+                sha256 TEXT,
+                size INTEGER,
+                uploaded_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trip_count INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                deleted_at TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return f"pbkdf2_sha256${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        _, salt_hex, digest_hex = stored.split("$", 2)
+    except ValueError:
+        return False
+    salt = bytes.fromhex(salt_hex)
+    expected = bytes.fromhex(digest_hex)
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return secrets.compare_digest(actual, expected)
+
+
+def ensure_admin_user() -> None:
+    with db_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+        if row:
+            return
+        conn.execute(
+            "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
+            (
+                "admin",
+                hash_password("fyy525200"),
+                1,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+
+
+init_db()
+ensure_admin_user()
 
 
 def parse_date_from_text(text: str) -> date | None:
@@ -101,9 +199,9 @@ def parse_date_from_text(text: str) -> date | None:
 
     fallback_candidates: list[date] = []
     for match in DATE_PATTERN.finditer(text):
-        parsed = build_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        if parsed:
-            fallback_candidates.append(parsed)
+        try_date = build_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        if try_date:
+            fallback_candidates.append(try_date)
 
     if not fallback_candidates:
         return None
@@ -117,40 +215,6 @@ def parse_amount_from_xml(text: str) -> float:
         if match:
             return float(match.group(1))
     return 0.0
-
-
-def load_upload_records() -> list[dict]:
-    if not UPLOAD_RECORDS_FILE.exists():
-        return []
-    try:
-        return json.loads(UPLOAD_RECORDS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-
-def save_upload_records(records: list[dict]) -> None:
-    UPLOAD_RECORDS_FILE.write_text(
-        json.dumps(records, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def sha256_of_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def list_uploads() -> list[dict]:
-    records = load_upload_records()
-    sorted_records = sorted(records, key=lambda r: r.get("uploaded_at", ""), reverse=True)
-    for rec in sorted_records:
-        stored_name = rec.get("stored_name", "")
-        file_path = UPLOADS_DIR / stored_name if stored_name else None
-        rec["file_exists"] = bool(file_path and file_path.exists())
-    return sorted_records
 
 
 def extract_zip(zip_path: Path, destination: Path) -> None:
@@ -227,14 +291,27 @@ def get_next_trip_index(day_dir: Path) -> int:
     return (max(existing) + 1) if existing else 1
 
 
+def user_storage_root(user_id: int) -> Path:
+    root = STORAGE_DIR / f"user_{user_id}"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def user_upload_root(user_id: int) -> Path:
+    root = UPLOADS_DIR / f"user_{user_id}"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def save_trip(
+    storage_root: Path,
     trip_date: date,
     itinerary_pdf: Path | None,
     invoices: Iterable[InvoiceItem],
     source_package: str,
     source_segment: str,
 ) -> TripRecord:
-    day_dir = STORAGE_DIR / f"{trip_date.year:04d}" / f"{trip_date.month:02d}" / f"{trip_date.day:02d}"
+    day_dir = storage_root / f"{trip_date.year:04d}" / f"{trip_date.month:02d}" / f"{trip_date.day:02d}"
     day_dir.mkdir(parents=True, exist_ok=True)
 
     trip_index = get_next_trip_index(day_dir)
@@ -276,7 +353,7 @@ def save_trip(
     )
 
 
-def process_uploaded_zip(upload_zip_path: Path, workspace: Path) -> list[TripRecord]:
+def process_uploaded_zip(upload_zip_path: Path, workspace: Path, storage_root: Path) -> list[TripRecord]:
     package_name = upload_zip_path.stem
     extract_root = workspace / package_name
     extract_zip(upload_zip_path, extract_root)
@@ -301,6 +378,7 @@ def process_uploaded_zip(upload_zip_path: Path, workspace: Path) -> list[TripRec
             itinerary = extract_itinerary_pdf(seg / "detail.zip", seg_workspace)
 
             record = save_trip(
+                storage_root=storage_root,
                 trip_date=dominant,
                 itinerary_pdf=itinerary,
                 invoices=invoices,
@@ -315,9 +393,12 @@ def process_uploaded_zip(upload_zip_path: Path, workspace: Path) -> list[TripRec
     return records
 
 
-def list_days() -> list[dict]:
+def list_days(storage_root: Path) -> list[dict]:
     days: list[dict] = []
-    for year_dir in sorted(STORAGE_DIR.glob("*"), reverse=True):
+    if not storage_root.exists():
+        return days
+
+    for year_dir in sorted(storage_root.glob("*"), reverse=True):
         if not year_dir.is_dir() or not year_dir.name.isdigit():
             continue
         for month_dir in sorted(year_dir.glob("*"), reverse=True):
@@ -348,56 +429,252 @@ def list_days() -> list[dict]:
     return days
 
 
-def get_day_dir(year: int, month: int, day: int) -> Path:
-    day_dir = STORAGE_DIR / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
+def get_day_dir(storage_root: Path, year: int, month: int, day: int) -> Path:
+    day_dir = storage_root / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
     if not day_dir.exists():
         raise HTTPException(status_code=404, detail="指定日期不存在")
     return day_dir
 
 
-def within_storage(path: Path) -> bool:
+def within_root(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(STORAGE_DIR.resolve())
+        path.resolve().relative_to(root.resolve())
         return True
     except ValueError:
         return False
 
 
-def within_uploads(path: Path) -> bool:
-    try:
-        path.resolve().relative_to(UPLOADS_DIR.resolve())
-        return True
-    except ValueError:
-        return False
+def sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    with db_conn() as conn:
+        row = conn.execute("SELECT id, username, is_admin, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_current_user(request: Request) -> dict | None:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return None
+    return get_user_by_id(int(user_id))
+
+
+def ensure_login(request: Request) -> dict | None:
+    user = get_current_user(request)
+    if not user:
+        return None
+    return user
+
+
+def list_uploads_for_user(user_id: int) -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, original_name, stored_name, sha256, size, uploaded_at, status, trip_count, message, deleted_at
+            FROM upload_records
+            WHERE user_id = ?
+            ORDER BY uploaded_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+    upload_root = user_upload_root(user_id)
+    result = []
+    for row in rows:
+        item = dict(row)
+        stored_name = item.get("stored_name")
+        item["file_exists"] = bool(stored_name and (upload_root / stored_name).exists())
+        result.append(item)
+    return result
+
+
+def render_page(request: Request, template: str, context: dict) -> HTMLResponse:
+    merged = {"request": request, "current_user": get_current_user(request)}
+    merged.update(context)
+    return templates.TemplateResponse(template, merged)
 
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, message: str | None = None) -> HTMLResponse:
-    return templates.TemplateResponse(
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    storage_root = user_storage_root(user["id"])
+    return render_page(
+        request,
         "index.html",
         {
-            "request": request,
-            "days": list_days(),
-            "uploads": list_uploads(),
+            "days": list_days(storage_root),
+            "uploads": list_uploads_for_user(user["id"]),
             "message": message,
         },
     )
 
 
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, message: str | None = None) -> HTMLResponse:
+    if get_current_user(request):
+        return RedirectResponse(url="/", status_code=303)
+    return render_page(request, "login.html", {"message": message})
+
+
+@app.post("/login")
+def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+) -> RedirectResponse:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, username, password_hash, is_admin FROM users WHERE username = ?",
+            (username.strip(),),
+        ).fetchone()
+
+    if not row or not verify_password(password, row["password_hash"]):
+        return RedirectResponse(url=f"/login?message={quote('用户名或密码错误')}", status_code=303)
+
+    request.session["user_id"] = int(row["id"])
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/register", response_class=HTMLResponse)
+def register_page(request: Request, message: str | None = None) -> HTMLResponse:
+    if get_current_user(request):
+        return RedirectResponse(url="/", status_code=303)
+    return render_page(request, "register.html", {"message": message})
+
+
+@app.post("/register")
+def register_submit(
+    username: str = Form(...),
+    password: str = Form(...),
+    invite_code: str = Form(...),
+) -> RedirectResponse:
+    username = username.strip()
+    invite_code = invite_code.strip().upper()
+
+    if len(username) < 3:
+        return RedirectResponse(url=f"/register?message={quote('用户名至少3个字符')}", status_code=303)
+    if len(password) < 6:
+        return RedirectResponse(url=f"/register?message={quote('密码至少6位')}", status_code=303)
+
+    with db_conn() as conn:
+        existed = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if existed:
+            return RedirectResponse(url=f"/register?message={quote('用户名已存在')}", status_code=303)
+
+        invite = conn.execute(
+            "SELECT id FROM invite_codes WHERE code = ? AND used_by IS NULL",
+            (invite_code,),
+        ).fetchone()
+        if not invite:
+            return RedirectResponse(url=f"/register?message={quote('邀请码无效或已使用')}", status_code=303)
+
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 0, ?)",
+            (username, hash_password(password), datetime.now().isoformat(timespec="seconds")),
+        )
+        user_id = int(cur.lastrowid)
+
+        conn.execute(
+            "UPDATE invite_codes SET used_by = ?, used_at = ? WHERE id = ?",
+            (user_id, datetime.now().isoformat(timespec="seconds"), int(invite["id"])),
+        )
+        conn.commit()
+
+    return RedirectResponse(url=f"/login?message={quote('注册成功，请登录')}", status_code=303)
+
+
+@app.get("/logout")
+def logout(request: Request) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
+
+
+@app.get("/admin/invites", response_class=HTMLResponse)
+def admin_invites(request: Request, message: str | None = None) -> HTMLResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.get("is_admin"):
+        return RedirectResponse(url=f"/?message={quote('仅管理员可访问')}", status_code=303)
+
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT i.code, i.created_at, i.used_at, u.username AS used_by_name
+            FROM invite_codes i
+            LEFT JOIN users u ON i.used_by = u.id
+            ORDER BY i.created_at DESC
+            """
+        ).fetchall()
+
+    return render_page(
+        request,
+        "admin_invites.html",
+        {"invites": [dict(r) for r in rows], "message": message},
+    )
+
+
+@app.post("/admin/invites/create")
+def admin_create_invites(request: Request, count: int = Form(1)) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.get("is_admin"):
+        return RedirectResponse(url=f"/?message={quote('仅管理员可操作')}", status_code=303)
+
+    count = max(1, min(count, 100))
+    created = 0
+    codes: list[str] = []
+
+    with db_conn() as conn:
+        for _ in range(count):
+            code = f"INV-{secrets.token_hex(4).upper()}"
+            try:
+                conn.execute(
+                    "INSERT INTO invite_codes (code, created_by, created_at) VALUES (?, ?, ?)",
+                    (code, user["id"], datetime.now().isoformat(timespec="seconds")),
+                )
+                created += 1
+                codes.append(code)
+            except sqlite3.IntegrityError:
+                continue
+        conn.commit()
+
+    message = f"已生成邀请码 {created} 个：{'，'.join(codes[:10])}"
+    return RedirectResponse(url=f"/admin/invites?message={quote(message)}", status_code=303)
+
+
 @app.post("/upload")
-async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
+async def upload(request: Request, files: list[UploadFile] = File(...)) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
     if not files:
         return RedirectResponse(url=f"/?message={quote('未选择文件')}", status_code=303)
+
+    user_id = int(user["id"])
+    uploads_root = user_upload_root(user_id)
+    storage_root = user_storage_root(user_id)
 
     workspace = TMP_DIR / f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    upload_records = load_upload_records()
-    active_hashes = {
-        r.get("sha256")
-        for r in upload_records
-        if r.get("sha256") and r.get("status") != "deleted"
-    }
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT sha256 FROM upload_records WHERE user_id = ? AND status = 'processed' AND sha256 IS NOT NULL",
+            (user_id,),
+        ).fetchall()
+    active_hashes = {r["sha256"] for r in rows}
 
     processed_count = 0
     trip_count = 0
@@ -413,7 +690,8 @@ async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
             upload_id = uuid.uuid4().hex
             safe_name = Path(upload_file.filename).name
             stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{upload_id}_{safe_name}"
-            target = UPLOADS_DIR / stored_name
+            target = uploads_root / stored_name
+
             with target.open("wb") as f:
                 shutil.copyfileobj(upload_file.file, f)
 
@@ -423,43 +701,55 @@ async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
             if file_hash in active_hashes:
                 duplicate_count += 1
                 target.unlink(missing_ok=True)
-                upload_records.append(
-                    {
-                        "id": upload_id,
-                        "original_name": safe_name,
-                        "stored_name": "",
-                        "sha256": file_hash,
-                        "size": file_size,
-                        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
-                        "status": "duplicate",
-                        "trip_count": 0,
-                        "message": "重复上传，已跳过处理",
-                    }
-                )
+                with db_conn() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO upload_records (id, user_id, original_name, stored_name, sha256, size, uploaded_at, status, trip_count, message)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            upload_id,
+                            user_id,
+                            safe_name,
+                            "",
+                            file_hash,
+                            file_size,
+                            datetime.now().isoformat(timespec="seconds"),
+                            "duplicate",
+                            0,
+                            "重复上传，已跳过处理",
+                        ),
+                    )
+                    conn.commit()
                 continue
 
-            records = process_uploaded_zip(target, workspace)
+            records = process_uploaded_zip(target, workspace, storage_root)
             processed_count += 1
             trip_count += len(records)
             active_hashes.add(file_hash)
 
-            upload_records.append(
-                {
-                    "id": upload_id,
-                    "original_name": safe_name,
-                    "stored_name": stored_name,
-                    "sha256": file_hash,
-                    "size": file_size,
-                    "uploaded_at": datetime.now().isoformat(timespec="seconds"),
-                    "status": "processed",
-                    "trip_count": len(records),
-                    "message": "处理成功",
-                }
-            )
+            with db_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO upload_records (id, user_id, original_name, stored_name, sha256, size, uploaded_at, status, trip_count, message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        upload_id,
+                        user_id,
+                        safe_name,
+                        stored_name,
+                        file_hash,
+                        file_size,
+                        datetime.now().isoformat(timespec="seconds"),
+                        "processed",
+                        len(records),
+                        "处理成功",
+                    ),
+                )
+                conn.commit()
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
-
-    save_upload_records(upload_records)
 
     msg = f"上传完成：处理压缩包 {processed_count} 个，新增行程 {trip_count} 段，重复跳过 {duplicate_count} 个"
     return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)
@@ -467,7 +757,12 @@ async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
 
 @app.get("/day/{year}/{month}/{day}", response_class=HTMLResponse)
 def view_day(year: int, month: int, day: int, request: Request) -> HTMLResponse:
-    day_dir = get_day_dir(year, month, day)
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    storage_root = user_storage_root(int(user["id"]))
+    day_dir = get_day_dir(storage_root, year, month, day)
     trips = []
 
     for trip_dir in sorted(day_dir.glob("trip_*")):
@@ -490,10 +785,10 @@ def view_day(year: int, month: int, day: int, request: Request) -> HTMLResponse:
             }
         )
 
-    return templates.TemplateResponse(
+    return render_page(
+        request,
         "day.html",
         {
-            "request": request,
             "year": year,
             "month": month,
             "day": day,
@@ -502,10 +797,42 @@ def view_day(year: int, month: int, day: int, request: Request) -> HTMLResponse:
     )
 
 
+@app.post("/days/clear")
+def clear_days(request: Request, selected_day: list[str] = Form(default=[])) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    storage_root = user_storage_root(int(user["id"]))
+    cleared = 0
+
+    for item in selected_day:
+        parts = item.split("-")
+        if len(parts) != 3:
+            continue
+        try:
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+
+        day_dir = storage_root / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
+        if day_dir.exists() and day_dir.is_dir() and within_root(day_dir, storage_root):
+            shutil.rmtree(day_dir, ignore_errors=True)
+            cleared += 1
+
+    msg = f"已批量清空 {cleared} 个日期"
+    return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)
+
+
 @app.post("/day/{year}/{month}/{day}/clear")
-def clear_day(year: int, month: int, day: int) -> RedirectResponse:
-    day_dir = STORAGE_DIR / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
-    if day_dir.exists() and day_dir.is_dir():
+def clear_day(year: int, month: int, day: int, request: Request) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    storage_root = user_storage_root(int(user["id"]))
+    day_dir = storage_root / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
+    if day_dir.exists() and day_dir.is_dir() and within_root(day_dir, storage_root):
         shutil.rmtree(day_dir, ignore_errors=True)
         msg = f"已清空 {year:04d}-{month:02d}-{day:02d} 的数据"
     else:
@@ -514,8 +841,13 @@ def clear_day(year: int, month: int, day: int) -> RedirectResponse:
 
 
 @app.get("/download/day/{year}/{month}/{day}")
-def download_day(year: int, month: int, day: int) -> StreamingResponse:
-    day_dir = get_day_dir(year, month, day)
+def download_day(year: int, month: int, day: int, request: Request) -> StreamingResponse:
+    user = ensure_login(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    storage_root = user_storage_root(int(user["id"]))
+    day_dir = get_day_dir(storage_root, year, month, day)
 
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -530,60 +862,78 @@ def download_day(year: int, month: int, day: int) -> StreamingResponse:
 
 
 @app.get("/file/{year}/{month}/{day}/{trip}/{filename}")
-def download_file(year: int, month: int, day: int, trip: str, filename: str) -> FileResponse:
-    file_path = STORAGE_DIR / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / trip / filename
-    if not file_path.exists() or not file_path.is_file() or not within_storage(file_path):
+def download_file(year: int, month: int, day: int, trip: str, filename: str, request: Request) -> FileResponse:
+    user = ensure_login(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    storage_root = user_storage_root(int(user["id"]))
+    file_path = storage_root / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / trip / filename
+    if not file_path.exists() or not file_path.is_file() or not within_root(file_path, storage_root):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path=file_path)
 
 
 @app.get("/uploads/{upload_id}/download")
-def download_upload(upload_id: str) -> FileResponse:
-    records = load_upload_records()
-    record = next((r for r in records if r.get("id") == upload_id), None)
-    if not record:
+def download_upload(upload_id: str, request: Request) -> FileResponse:
+    user = ensure_login(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    user_id = int(user["id"])
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT original_name, stored_name, status FROM upload_records WHERE id = ? AND user_id = ?",
+            (upload_id, user_id),
+        ).fetchone()
+
+    if not row:
         raise HTTPException(status_code=404, detail="上传记录不存在")
 
-    stored_name = record.get("stored_name", "")
-    if not stored_name:
+    stored_name = row["stored_name"] or ""
+    if not stored_name or row["status"] == "deleted":
         raise HTTPException(status_code=404, detail="该记录没有可下载源文件")
 
-    file_path = UPLOADS_DIR / stored_name
-    if not file_path.exists() or not file_path.is_file() or not within_uploads(file_path):
+    uploads_root = user_upload_root(user_id)
+    file_path = uploads_root / stored_name
+    if not file_path.exists() or not file_path.is_file() or not within_root(file_path, uploads_root):
         raise HTTPException(status_code=404, detail="源文件不存在")
 
-    filename = record.get("original_name") or file_path.name
+    filename = row["original_name"] or file_path.name
     return FileResponse(path=file_path, filename=filename)
 
 
 @app.post("/uploads/{upload_id}/delete")
-def delete_upload(upload_id: str) -> RedirectResponse:
-    records = load_upload_records()
-    changed = False
+def delete_upload(upload_id: str, request: Request) -> RedirectResponse:
+    user = ensure_login(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    user_id = int(user["id"])
+    uploads_root = user_upload_root(user_id)
     deleted_name = ""
 
-    for record in records:
-        if record.get("id") != upload_id:
-            continue
-        if record.get("status") == "deleted":
-            break
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, original_name, stored_name, status FROM upload_records WHERE id = ? AND user_id = ?",
+            (upload_id, user_id),
+        ).fetchone()
 
-        stored_name = record.get("stored_name", "")
+        if not row or row["status"] == "deleted":
+            return RedirectResponse(url=f"/?message={quote('未找到可删除的上传记录')}", status_code=303)
+
+        stored_name = row["stored_name"] or ""
         if stored_name:
-            file_path = UPLOADS_DIR / stored_name
-            if file_path.exists() and file_path.is_file() and within_uploads(file_path):
+            file_path = uploads_root / stored_name
+            if file_path.exists() and file_path.is_file() and within_root(file_path, uploads_root):
                 file_path.unlink(missing_ok=True)
-            deleted_name = record.get("original_name", stored_name)
+            deleted_name = row["original_name"] or stored_name
 
-        record["status"] = "deleted"
-        record["deleted_at"] = datetime.now().isoformat(timespec="seconds")
-        changed = True
-        break
+        conn.execute(
+            "UPDATE upload_records SET status = 'deleted', deleted_at = ? WHERE id = ? AND user_id = ?",
+            (datetime.now().isoformat(timespec="seconds"), upload_id, user_id),
+        )
+        conn.commit()
 
-    if changed:
-        save_upload_records(records)
-        msg = f"已删除上传文件：{deleted_name or upload_id}"
-    else:
-        msg = "未找到可删除的上传记录"
-
+    msg = f"已删除上传文件：{deleted_name or upload_id}"
     return RedirectResponse(url=f"/?message={quote(msg)}", status_code=303)

@@ -11,6 +11,19 @@
     <div class="container">
       <h1>高速费票据整理系统</h1>
       <p>上传压缩包，自动按 年/月/日/行程 分类并提供按日打包下载</p>
+      <nav class="top-nav">
+        {% if current_user %}
+          <span>当前用户：{{ current_user.username }}</span>
+          <a href="/">首页</a>
+          {% if current_user.is_admin %}
+            <a href="/admin/invites">邀请码管理</a>
+          {% endif %}
+          <a href="/logout">退出</a>
+        {% else %}
+          <a href="/login">登录</a>
+          <a href="/register">注册</a>
+        {% endif %}
+      </nav>
     </div>
   </header>
   <main class="container">

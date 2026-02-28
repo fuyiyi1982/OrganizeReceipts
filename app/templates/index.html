@@ -16,36 +16,53 @@
 <section class="card">
   <h2>已整理日期</h2>
   {% if days %}
-    <table>
-      <thead>
-        <tr>
-          <th>日期</th>
-          <th>行程段数</th>
-          <th>合计金额(元)</th>
-          <th>操作</th>
-          <th>数据维护</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for d in days %}
-        <tr>
-          <td>{{ "%04d-%02d-%02d"|format(d.year, d.month, d.day) }}</td>
-          <td>{{ d.trip_count }}</td>
-          <td>{{ "%.2f"|format(d.total_amount) }}</td>
-          <td>
-            <a href="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">查看</a>
-            <span> | </span>
-            <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">按日下载ZIP</a>
-          </td>
-          <td>
-            <form action="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}/clear" method="post" onsubmit="return confirm('确定清空该日期下全部行程数据吗？');">
-              <button type="submit" class="danger">清空当天数据</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <form action="/days/clear" method="post" onsubmit="return confirm('确定批量清空勾选日期的数据吗？');">
+      <div class="batch-actions">
+        <button type="button" id="select-all">全选</button>
+        <button type="button" id="clear-select">清空选择</button>
+        <button type="submit" class="danger">批量清空选中日期</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>选择</th>
+            <th>日期</th>
+            <th>行程段数</th>
+            <th>合计金额(元)</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for d in days %}
+          {% set day_value = "%04d-%02d-%02d"|format(d.year, d.month, d.day) %}
+          <tr>
+            <td><input type="checkbox" name="selected_day" value="{{ day_value }}" class="day-checkbox" /></td>
+            <td>{{ day_value }}</td>
+            <td>{{ d.trip_count }}</td>
+            <td>{{ "%.2f"|format(d.total_amount) }}</td>
+            <td>
+              <a href="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">查看</a>
+              <span> | </span>
+              <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">按日下载ZIP</a>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </form>
+    <script>
+      (function () {
+        const allBtn = document.getElementById('select-all');
+        const clearBtn = document.getElementById('clear-select');
+        const boxes = Array.from(document.querySelectorAll('.day-checkbox'));
+        if (allBtn) {
+          allBtn.addEventListener('click', () => boxes.forEach((b) => { b.checked = true; }));
+        }
+        if (clearBtn) {
+          clearBtn.addEventListener('click', () => boxes.forEach((b) => { b.checked = false; }));
+        }
+      })();
+    </script>
   {% else %}
     <p>暂无数据，请先上传压缩包。</p>
   {% endif %}
