@@ -9,7 +9,7 @@
   <form action="/profile/update" method="post" class="auth-form">
     <label>用户名</label>
     <input type="text" name="username" value="{{ current_user.username }}" required minlength="3" />
-    <button type="submit">保存用户信息</button>
+    <button type="submit"><span class="icon-dot">💾</span>保存用户信息</button>
   </form>
 </section>
 
@@ -22,7 +22,7 @@
     <input type="password" name="new_password" required minlength="6" />
     <label>确认新密码</label>
     <input type="password" name="confirm_password" required minlength="6" />
-    <button type="submit">更新密码</button>
+    <button type="submit"><span class="icon-dot">🔑</span>更新密码</button>
   </form>
 </section>
 {% endblock %}

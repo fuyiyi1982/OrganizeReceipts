@@ -4,12 +4,12 @@
 <section class="card">
   <h2>日期：{{ "%04d-%02d-%02d"|format(year, month, day) }}</h2>
   <p>
-    <a href="/">返回首页</a>
+    <a href="/" class="btn btn-outline"><span class="icon-dot">↩</span>返回首页</a>
     <span> | </span>
-    <a href="/download/day/{{ year }}/{{ month }}/{{ day }}">下载当日ZIP</a>
+    <a href="/download/day/{{ year }}/{{ month }}/{{ day }}" class="btn"><span class="icon-dot">⬇</span>下载当日ZIP</a>
   </p>
   <form action="/day/{{ year }}/{{ month }}/{{ day }}/clear" method="post" onsubmit="return confirm('确定清空该日期下全部行程数据吗？');">
-    <button type="submit" class="danger">清空当天数据</button>
+    <button type="submit" class="danger"><span class="icon-dot">🗑</span>清空当天数据</button>
   </form>
 </section>
 

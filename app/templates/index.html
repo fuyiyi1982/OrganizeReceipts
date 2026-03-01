@@ -5,7 +5,7 @@
   <h2>上传压缩包</h2>
   <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form">
     <input type="file" name="files" accept=".zip" multiple required />
-    <button type="submit">开始整理</button>
+    <button type="submit"><span class="icon-dot">⬆</span>开始整理</button>
   </form>
   <p class="hint">支持一次上传多个 ZIP 文件（例如当月导出的多个分卷压缩包）。</p>
   {% if message %}
@@ -18,9 +18,9 @@
   {% if days %}
     <form action="/days/clear" method="post" onsubmit="return confirm('确定批量清空勾选日期的数据吗？');">
       <div class="batch-actions">
-        <button type="button" id="select-all">全选</button>
-        <button type="button" id="clear-select">清空选择</button>
-        <button type="submit" class="danger">批量清空选中日期</button>
+        <button type="button" id="select-all" class="btn-outline"><span class="icon-dot">✓</span>全选</button>
+        <button type="button" id="clear-select" class="btn-outline"><span class="icon-dot">×</span>清空选择</button>
+        <button type="submit" class="danger"><span class="icon-dot">🗑</span>批量清空选中日期</button>
       </div>
       <table>
         <thead>
@@ -41,9 +41,9 @@
             <td>{{ d.trip_count }}</td>
             <td>{{ "%.2f"|format(d.total_amount) }}</td>
             <td>
-              <a href="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">查看</a>
+              <a href="/day/{{ d.year }}/{{ d.month }}/{{ d.day }}" class="btn btn-outline"><span class="icon-dot">👁</span>查看</a>
               <span> | </span>
-              <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}">按日下载ZIP</a>
+              <a href="/download/day/{{ d.year }}/{{ d.month }}/{{ d.day }}" class="btn"><span class="icon-dot">⬇</span>按日下载ZIP</a>
             </td>
           </tr>
         {% endfor %}
@@ -92,10 +92,10 @@
           <td>{{ (u.sha256 or '')[:12] }}</td>
           <td>
             {% if u.status != 'deleted' and u.file_exists %}
-              <a href="/uploads/{{ u.id }}/download">下载源文件</a>
+              <a href="/uploads/{{ u.id }}/download" class="btn btn-outline"><span class="icon-dot">⬇</span>下载源文件</a>
               <span> | </span>
               <form action="/uploads/{{ u.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('确定删除这个上传源文件吗？');">
-                <button type="submit" class="danger">删除</button>
+                <button type="submit" class="danger"><span class="icon-dot">🗑</span>删除</button>
               </form>
             {% else %}
               <span>-</span>
